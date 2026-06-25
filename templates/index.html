@@ -1,0 +1,453 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Meli Cheap — Los más baratos por categoría</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header>
+    <div class="header-left">
+      <span class="header-logo">🛒</span>
+      <h1>Meli Cheap</h1>
+    </div>
+    <div class="header-stats" id="headerStats">
+      <span class="stat">📦 <strong id="statProducts">0</strong> productos</span>
+      <span class="stat">🏷️ <strong id="statDiscounts">0</strong> con descuento</span>
+      <span class="stat">🚚 <strong id="statShipping">0</strong> envío gratis</span>
+      <span class="stat" id="statUpdated"></span>
+    </div>
+    <div class="header-actions">
+      <button class="btn btn-primary" id="refreshBtn" onclick="refreshAll()">🔄 Actualizar</button>
+    </div>
+  </header>
+
+  <main>
+    <aside id="categoryPanel">
+      <div class="panel-header">
+        <h2>Categorías</h2>
+        <input type="text" class="cat-search" id="catSearch" placeholder="Buscar categoría..." oninput="filterCategories()">
+      </div>
+      <div id="categoryList"></div>
+      <div id="refreshProgress">
+        <span id="progressLabel">Actualizando...</span>
+        <div class="progress-bar">
+          <div class="progress-bar-fill" id="progressFill" style="width:0%"></div>
+        </div>
+        <span id="progressText">0/0</span>
+      </div>
+    </aside>
+
+    <section id="productPanel">
+      <div id="productHeader">
+        <div class="header-left-col">
+          <h2 id="categoryTitle">Seleccioná una categoría</h2>
+          <span id="productCount"></span>
+        </div>
+        <div id="productFilters">
+          <input type="text" id="filterSearch" placeholder="Buscar producto..." oninput="applyFilters()">
+          <select id="filterDiscount" onchange="applyFilters()">
+            <option value="">Todos los precios</option>
+            <option value="with">Solo con descuento</option>
+            <option value="free">Envío gratis</option>
+          </select>
+          <select id="filterSort" onchange="applyFilters()">
+            <option value="price">Menor precio</option>
+            <option value="price-desc">Mayor precio</option>
+            <option value="discount">Mayor descuento</option>
+            <option value="newest">Más nuevos</option>
+          </select>
+        </div>
+      </div>
+
+      <div id="productList"></div>
+      <div id="pagination"></div>
+      <div id="loading" class="hidden">
+        <div class="skeleton-row">
+          <div class="skeleton skeleton-img"></div>
+          <div class="skeleton-lines">
+            <div class="skeleton skeleton-line"></div>
+            <div class="skeleton skeleton-line"></div>
+            <div class="skeleton skeleton-line"></div>
+          </div>
+          <div class="skeleton skeleton-price"></div>
+        </div>
+        <div class="skeleton-row" style="margin-top:8px;">
+          <div class="skeleton skeleton-img"></div>
+          <div class="skeleton-lines">
+            <div class="skeleton skeleton-line"></div>
+            <div class="skeleton skeleton-line"></div>
+            <div class="skeleton skeleton-line"></div>
+          </div>
+          <div class="skeleton skeleton-price"></div>
+        </div>
+        <div class="skeleton-row" style="margin-top:8px;">
+          <div class="skeleton skeleton-img"></div>
+          <div class="skeleton-lines">
+            <div class="skeleton skeleton-line"></div>
+            <div class="skeleton skeleton-line"></div>
+            <div class="skeleton skeleton-line"></div>
+          </div>
+          <div class="skeleton skeleton-price"></div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <button id="backToTop" onclick="window.scrollTo({top:0,behavior:'smooth'})">↑</button>
+
+  <div id="historyModal" class="modal">
+    <div class="modal-content">
+      <span class="close" onclick="closeHistory()">&times;</span>
+      <h3 id="historyTitle">Historial de precios</h3>
+      <canvas id="priceChart" width="700" height="320"></canvas>
+    </div>
+  </div>
+
+  <script>
+    const API_BASE = "";
+    let selectedCategory = null;
+    let currentPage = 1;
+    let allProducts = [];
+    let filteredProducts = [];
+
+    const CATEGORY_ICONS = {
+      'hogar-muebles-y-jardin': '🏠', 'electrodomesticos-y-aires-ac': '🔌', 'herramientas': '🔧',
+      'construccion': '🏗️', 'deportes-y-fitness': '⚽', 'accesorios-para-vehiculos': '🚗',
+      'animales-y-mascotas': '🐾', 'ropa-y-accesorios': '👕', 'juegos-y-juguetes': '🎮',
+      'bebes': '🍼', 'belleza-y-cuidado-personal': '💄', 'salud-y-equipamiento-medico': '💊',
+      'industrias-y-oficinas': '🏢', 'agro': '🌾', 'servicios': '🔧',
+      'celulares-y-telefonos': '📱', 'computacion': '💻', 'camaras-y-accesorios': '📷',
+      'electronica-audio-y-video': '🎵', 'consolas-y-videojuegos': '🎮',
+      'alimentos-y-bebidas': '🍔', 'antiguedades-y-colecciones': '🏺',
+      'arte-libreria-y-merceria': '🎨', 'autos-motos-y-otros': '🚘',
+      'entradas-para-eventos': '🎫', 'inmuebles': '🏠', 'instrumentos-musicales': '🎸',
+      'joyas-y-relojes': '💎', 'libros-revistas-y-comics': '📚',
+      'musica-peliculas-y-series': '🎬', 'souvenirs-cotillon-y-fiestas': '🎉',
+      'otras-categorias': '📦', 'moda': '👔',
+    };
+
+    function getCatIcon(id) { return CATEGORY_ICONS[id] || '📦'; }
+
+    async function fetchJSON(url, opts) {
+      const res = await fetch(url, opts);
+      if (!res.ok) throw new Error(await res.text());
+      return res.json();
+    }
+
+    async function loadCategories() {
+      const data = await fetchJSON(`${API_BASE}/api/categories`);
+      const container = document.getElementById("categoryList");
+      container.innerHTML = data.map(c => {
+        const isActive = selectedCategory === c.id;
+        return `<div class="category-card ${isActive ? 'active' : ''}" data-id="${c.id}" data-name="${c.name.replace(/"/g,'&quot;')}">
+          <span class="cat-icon">${getCatIcon(c.id)}</span>
+          <div class="cat-info">
+            <div class="cat-name">${c.name}</div>
+            <div class="cat-meta">${c.updated_at ? new Date(c.updated_at).toLocaleDateString('es-AR') : '—'}</div>
+          </div>
+          <span class="cat-count">${c.product_count}</span>
+        </div>`;
+      }).join("");
+      container.querySelectorAll(".category-card").forEach(el => {
+        el.addEventListener("click", () => selectCategory(el.dataset.id, el.dataset.name));
+      });
+      updateGlobalStats(data);
+    }
+
+    function updateGlobalStats(categories) {
+      let total = 0;
+      categories.forEach(c => total += c.product_count);
+      document.getElementById("statProducts").textContent = total;
+    }
+
+    async function selectCategory(categoryId, categoryName) {
+      if (selectedCategory === categoryId) return;
+      selectedCategory = categoryId;
+      currentPage = 1;
+      allProducts = [];
+      filteredProducts = [];
+      document.getElementById("categoryTitle").textContent = categoryName;
+      document.querySelectorAll(".category-card").forEach(el => el.classList.remove("active"));
+      document.querySelector(`.category-card[data-id="${categoryId}"]`)?.classList.add("active");
+      document.getElementById("productFilters").style.display = "flex";
+      await loadProducts();
+    }
+
+    async function loadProducts() {
+      if (!selectedCategory) return;
+      const panel = document.getElementById("productList");
+      const loading = document.getElementById("loading");
+      loading.classList.remove("hidden");
+      panel.innerHTML = "";
+
+      try {
+        const data = await fetchJSON(
+          `${API_BASE}/api/products?category_id=${selectedCategory}&page=${currentPage}&per_page=50`
+        );
+        allProducts = data.products;
+        applyFilters();
+        document.getElementById("productCount").textContent =
+          `${data.total} productos · pág. ${data.page}`;
+        renderPagination(data.total, data.page);
+      } catch (err) {
+        panel.innerHTML = `<div class="empty-state"><div class="empty-icon">😕</div><p>Error: ${err.message}</p></div>`;
+      } finally {
+        loading.classList.add("hidden");
+      }
+    }
+
+    function applyFilters() {
+      const search = (document.getElementById("filterSearch").value || "").toLowerCase();
+      const filter = document.getElementById("filterDiscount").value;
+      const sort = document.getElementById("filterSort").value;
+
+      filteredProducts = allProducts.filter(p => {
+        if (search && !p.title.toLowerCase().includes(search)) return false;
+        if (filter === "with" && !p.discount_percentage) return false;
+        if (filter === "free" && !p.free_shipping) return false;
+        return true;
+      });
+
+      filteredProducts.sort((a, b) => {
+        if (sort === "price") return a.price - b.price;
+        if (sort === "price-desc") return b.price - a.price;
+        if (sort === "discount") return (b.discount_percentage || 0) - (a.discount_percentage || 0);
+        if (sort === "newest") return new Date(b.last_seen) - new Date(a.last_seen);
+        return 0;
+      });
+
+      renderProducts(filteredProducts);
+    }
+
+    function renderProducts(products) {
+      const panel = document.getElementById("productList");
+
+      if (products.length === 0) {
+        panel.innerHTML = `<div class="empty-state">
+          <div class="empty-icon">🔍</div>
+          <p>No se encontraron productos con esos filtros.</p>
+        </div>`;
+        return;
+      }
+
+      panel.innerHTML = products.map(p => {
+        const imgSrc = (p.thumbnail || '').replace('http://', 'https://');
+        const hasDiscount = p.discount_percentage && p.discount_percentage > 0;
+        const hasOrigPrice = p.original_price && p.original_price > p.price;
+
+        let tagsHtml = '';
+        if (p.free_shipping) tagsHtml += `<span class="tag tag-shipping">🚚 Envío gratis</span>`;
+        if (p.condition) tagsHtml += `<span class="tag tag-condition-${p.condition}">${p.condition === 'new' ? 'Nuevo' : 'Usado'}</span>`;
+        if (p.installments) tagsHtml += `<span class="tag tag-installments">${p.installments}</span>`;
+
+        return `<div class="product-row">
+          <img src="${imgSrc}" alt="${p.title}" class="product-img" loading="lazy"
+               onerror="this.src='data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 width=%2272%22 height=%2272%22><rect fill=%22%23eee%22 width=%2272%22 height=%2272%22/></svg>'">
+          <div class="product-info">
+            <a href="${p.permalink}" target="_blank" class="product-title">${p.title}</a>
+            <div class="product-tags">${tagsHtml}</div>
+          </div>
+          <div class="product-price-block">
+            ${hasOrigPrice ? `<span class="original-price">$${p.original_price.toLocaleString('es-AR')}</span>` : ''}
+            <span class="product-price">$${p.price.toLocaleString('es-AR')}${hasDiscount ? `<span class="discount-badge">-${p.discount_percentage}%</span>` : ''}</span>
+          </div>
+          <button class="history-btn" onclick="showHistory('${p.id}','${p.title.replace(/'/g,"\\'").replace(/"/g,'&quot;')}')" title="Historial de precios">📈</button>
+        </div>`;
+      }).join("");
+    }
+
+    function renderPagination(total, page) {
+      const container = document.getElementById("pagination");
+      const perPage = 50;
+      const totalPages = Math.ceil(total / perPage);
+      if (totalPages <= 1) { container.innerHTML = ""; return; }
+      let html = '<div class="pagination">';
+      if (page > 1) html += `<button onclick="goToPage(${page - 1})">‹ Anterior</button>`;
+      let start = Math.max(1, page - 2), end = Math.min(totalPages, page + 2);
+      if (start > 1) html += `<button onclick="goToPage(1)">1</button>${start > 2 ? '<span>...</span>' : ''}`;
+      for (let i = start; i <= end; i++)
+        html += `<button class="${i === page ? 'active' : ''}" onclick="goToPage(${i})">${i}</button>`;
+      if (end < totalPages) html += `${end < totalPages - 1 ? '<span>...</span>' : ''}<button onclick="goToPage(${totalPages})">${totalPages}</button>`;
+      if (page < totalPages) html += `<button onclick="goToPage(${page + 1})">Siguiente ›</button>`;
+      html += '</div>';
+      container.innerHTML = html;
+    }
+
+    function goToPage(page) {
+      currentPage = page;
+      loadProducts();
+      document.getElementById("productPanel").scrollTop = 0;
+    }
+
+    function filterCategories() {
+      const q = document.getElementById("catSearch").value.toLowerCase();
+      document.querySelectorAll(".category-card").forEach(el => {
+        const name = el.querySelector(".cat-name").textContent.toLowerCase();
+        el.style.display = name.includes(q) ? "flex" : "none";
+      });
+    }
+
+    /* ===== REFRESH WITH SSE ===== */
+    function refreshAll() {
+      const btn = document.getElementById("refreshBtn");
+      btn.disabled = true;
+      btn.innerHTML = "⏳ Actualizando...";
+      const progress = document.getElementById("refreshProgress");
+      progress.classList.add("visible");
+
+      fetchJSON(`${API_BASE}/api/refresh`, { method: "POST" }).then(() => {
+        const es = new EventSource(`${API_BASE}/api/refresh/progress/stream`);
+        es.onmessage = (e) => {
+          const data = JSON.parse(e.data);
+          const fill = document.getElementById("progressFill");
+          const text = document.getElementById("progressText");
+          const label = document.getElementById("progressLabel");
+          fill.style.width = data.total > 0 ? `${(data.done / data.total) * 100}%` : "0%";
+          text.textContent = `${data.done}/${data.total}`;
+          if (data.current) label.textContent = `Actualizando: ${data.current}`;
+          if (data.done >= data.total) {
+            es.close();
+            setTimeout(() => {
+              progress.classList.remove("visible");
+              btn.disabled = false;
+              btn.innerHTML = "🔄 Actualizar";
+              loadCategories();
+              if (selectedCategory) loadProducts();
+            }, 500);
+          }
+        };
+        es.onerror = () => {
+          es.close();
+          setTimeout(() => {
+            progress.classList.remove("visible");
+            btn.disabled = false;
+            btn.innerHTML = "🔄 Actualizar";
+            loadCategories();
+            if (selectedCategory) loadProducts();
+          }, 2000);
+        };
+      }).catch(err => {
+        btn.disabled = false;
+        btn.innerHTML = "🔄 Actualizar";
+        progress.classList.remove("visible");
+        alert("Error: " + err.message);
+      });
+    }
+
+    /* ===== PRICE HISTORY ===== */
+    let currentProductId = null;
+
+    async function showHistory(productId, title) {
+      currentProductId = productId;
+      document.getElementById("historyTitle").textContent = `📈 Historial: ${title}`;
+      const modal = document.getElementById("historyModal");
+      modal.classList.add("visible");
+      try {
+        const data = await fetchJSON(`${API_BASE}/api/price-history?product_id=${productId}`);
+        renderChart(data);
+      } catch (err) { console.error(err); }
+    }
+
+    function closeHistory() {
+      document.getElementById("historyModal").classList.remove("visible");
+    }
+
+    function renderChart(history) {
+      const canvas = document.getElementById("priceChart");
+      const ctx = canvas.getContext("2d");
+      const w = canvas.width, h = canvas.height;
+      ctx.clearRect(0, 0, w, h);
+
+      if (history.length < 2) {
+        ctx.fillStyle = "#999";
+        ctx.font = "14px sans-serif";
+        ctx.textAlign = "center";
+        ctx.fillText("Se necesitan al menos 2 registros para mostrar el historial", w/2, h/2);
+        return;
+      }
+
+      const prices = history.map(h => h.price);
+      const dates = history.map(h => new Date(h.recorded_at));
+      const minPrice = Math.min(...prices);
+      const maxPrice = Math.max(...prices);
+      const range = maxPrice - minPrice || 1;
+
+      const pad = { top: 20, right: 20, bottom: 40, left: 75 };
+      const plotW = w - pad.left - pad.right;
+      const plotH = h - pad.top - pad.bottom;
+
+      function x(i) { return pad.left + (i / (history.length - 1)) * plotW; }
+      function y(p) { return pad.top + plotH - ((p - minPrice) / range) * plotH; }
+
+      ctx.strokeStyle = "#3483fa";
+      ctx.lineWidth = 2.5;
+      ctx.beginPath();
+      for (let i = 0; i < history.length; i++) {
+        const px = x(i), py = y(prices[i]);
+        i === 0 ? ctx.moveTo(px, py) : ctx.lineTo(px, py);
+      }
+      ctx.stroke();
+
+      ctx.fillStyle = "#3483fa";
+      for (let i = 0; i < history.length; i++) {
+        ctx.beginPath();
+        ctx.arc(x(i), y(prices[i]), 4, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      ctx.fillStyle = "#666";
+      ctx.font = "11px sans-serif";
+      ctx.textAlign = "center";
+      dates.forEach((d, i) => {
+        const label = d.toLocaleDateString("es-AR", { day: "2-digit", month: "2-digit" });
+        ctx.fillText(label, x(i), h - 10);
+      });
+
+      ctx.textAlign = "right";
+      ctx.font = "11px sans-serif";
+      ctx.fillStyle = "#3483fa";
+      ctx.font = "bold 12px sans-serif";
+      ctx.fillText(`$${maxPrice.toLocaleString('es-AR')}`, pad.left - 5, pad.top + 10);
+      ctx.fillText(`$${minPrice.toLocaleString('es-AR')}`, pad.left - 5, h - pad.bottom - 5);
+
+      ctx.strokeStyle = "#e0e0e0";
+      ctx.lineWidth = 1;
+      ctx.setLineDash([4, 4]);
+      ctx.beginPath();
+      ctx.moveTo(pad.left, y(minPrice));
+      ctx.lineTo(w - pad.right, y(minPrice));
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+
+    /* ===== BACK TO TOP ===== */
+    document.getElementById("productPanel").addEventListener("scroll", () => {
+      const btn = document.getElementById("backToTop");
+      const panel = document.getElementById("productPanel");
+      btn.classList.toggle("visible", panel.scrollTop > 300);
+    });
+
+    /* ===== MODAL CLOSE ON OVERLAY ===== */
+    document.getElementById("historyModal").addEventListener("click", function(e) {
+      if (e.target === this) closeHistory();
+    });
+
+    /* ===== INIT ===== */
+    document.getElementById("productFilters").style.display = "none";
+    loadCategories();
+    loadStats();
+
+    async function loadStats() {
+      try {
+        const cats = await fetchJSON(`${API_BASE}/api/categories`);
+        let total = 0;
+        cats.forEach(c => { total += c.product_count; });
+        document.getElementById("statProducts").textContent = total;
+        const d = await fetchJSON(`${API_BASE}/api/refresh/progress`).catch(() => ({}));
+      } catch(e) {}
+    }
+  </script>
+</body>
+</html>
