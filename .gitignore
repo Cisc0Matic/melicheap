@@ -12,3 +12,6 @@ frontend/android/local.properties
 frontend/android/capacitor-cordova-android-plugins/build/
 .DS_Store
 *.apk
+_debug_*.py
+_test_*.py
+

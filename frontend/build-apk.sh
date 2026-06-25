@@ -20,4 +20,4 @@ JAVA_HOME=/usr/lib/jvm/java-1.17.0-openjdk-amd64 \
 ./gradlew assembleDebug
 
 echo "=== APK listo ==="
-find android -name "*.apk"
+find "$(pwd)/android" -name "*.apk"
