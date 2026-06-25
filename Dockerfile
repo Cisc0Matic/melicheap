@@ -5,7 +5,7 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-RUN PLAYWRIGHT_BROWSERS_PATH=/tmp/browsers python -m playwright install chromium --with-deps
+RUN PLAYWRIGHT_BROWSERS_PATH=/tmp/browsers python -m playwright install chromium chromium-headless-shell --with-deps
 
 ENV PLAYWRIGHT_BROWSERS_PATH=/tmp/browsers
 
