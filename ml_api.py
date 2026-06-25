@@ -44,53 +44,97 @@ async def _new_page() -> Page:
     return await context.new_page()
 
 
+FALLBACK_CATEGORIES = [
+    {"id": "celulares", "name": "Celulares y Teléfonos"},
+    {"id": "computacion", "name": "Computación"},
+    {"id": "electronica-audio-y-video", "name": "Electrónica, Audio y Video"},
+    {"id": "hogar-muebles-y-jardin", "name": "Hogar, Muebles y Jardín"},
+    {"id": "electrodomesticos-y-aires-ac", "name": "Electrodomésticos"},
+    {"id": "herramientas", "name": "Herramientas"},
+    {"id": "construccion", "name": "Construcción"},
+    {"id": "deportes-y-fitness", "name": "Deportes y Fitness"},
+    {"id": "accesorios-para-vehiculos", "name": "Accesorios para Vehículos"},
+    {"id": "animales-y-mascotas", "name": "Animales y Mascotas"},
+    {"id": "ropa-y-accesorios", "name": "Ropa y Accesorios"},
+    {"id": "juegos-y-juguetes", "name": "Juegos y Juguetes"},
+    {"id": "bebes", "name": "Bebés"},
+    {"id": "belleza-y-cuidado-personal", "name": "Belleza y Cuidado Personal"},
+    {"id": "salud-y-equipamiento-medico", "name": "Salud y Equipamiento Médico"},
+    {"id": "industrias-y-oficinas", "name": "Industrias y Oficinas"},
+    {"id": "agro", "name": "Agro"},
+    {"id": "servicios", "name": "Servicios"},
+    {"id": "camaras-y-accesorios", "name": "Cámaras y Accesorios"},
+    {"id": "consolas-y-videojuegos", "name": "Consolas y Videojuegos"},
+    {"id": "alimentos-y-bebidas", "name": "Alimentos y Bebidas"},
+    {"id": "antiguedades-y-colecciones", "name": "Antigüedades y Colecciones"},
+    {"id": "arte-libreria-y-merceria", "name": "Arte, Librería y Mercería"},
+    {"id": "autos-motos-y-otros", "name": "Autos, Motos y Otros"},
+    {"id": "entradas-para-eventos", "name": "Entradas para Eventos"},
+    {"id": "inmuebles", "name": "Inmuebles"},
+    {"id": "instrumentos-musicales", "name": "Instrumentos Musicales"},
+    {"id": "joyas-y-relojes", "name": "Joyas y Relojes"},
+    {"id": "libros-revistas-y-comics", "name": "Libros, Revistas y Comics"},
+    {"id": "musica-peliculas-y-series", "name": "Música, Películas y Series"},
+    {"id": "souvenirs-cotillon-y-fiestas", "name": "Souvenirs, Cotillón y Fiestas"},
+    {"id": "otras-categorias", "name": "Otras Categorías"},
+]
+
+
 class MLApiClient:
     async def close(self):
         pass
 
     async def get_categories(self) -> list[dict]:
-        page = await _new_page()
         try:
-            await page.goto(
-                "https://www.mercadolibre.com.ar/categorias",
-                wait_until="load",
-                timeout=30000,
-            )
-            await page.wait_for_timeout(2000)
+            page = await _new_page()
+            try:
+                await page.goto(
+                    "https://www.mercadolibre.com.ar/categorias",
+                    wait_until="load",
+                    timeout=30000,
+                )
+                await page.wait_for_timeout(2000)
 
-            cats = await page.evaluate("""
-                () => {
-                    const links = document.querySelectorAll('a[href*="/c/"]');
-                    const seen = new Set();
-                    const result = [];
-                    links.forEach(a => {
-                        const href = a.getAttribute('href') || '';
-                        const text = a.textContent?.trim();
-                        if (text && text.length >= 3 && !seen.has(href)) {
-                            seen.add(href);
-                            result.push({ name: text, href });
-                        }
-                    });
-                    return result;
-                }
-            """)
+                cats = await page.evaluate("""
+                    () => {
+                        const links = document.querySelectorAll('a[href*="/c/"]');
+                        const seen = new Set();
+                        const result = [];
+                        links.forEach(a => {
+                            const href = a.getAttribute('href') || '';
+                            const text = a.textContent?.trim();
+                            if (text && text.length >= 3 && !seen.has(href)) {
+                                seen.add(href);
+                                result.push({ name: text, href });
+                            }
+                        });
+                        return result;
+                    }
+                """)
 
-            seen = set()
-            result = []
-            for c in cats:
-                href = c.get("href", "")
-                name = c.get("name", "")
-                m = re.search(r"/c/([^/#]+)", href)
-                if not m:
-                    continue
-                slug = m.group(1)
-                if slug in seen or len(name) < 3:
-                    continue
-                seen.add(slug)
-                result.append({"id": slug, "name": name})
-            return result
-        finally:
-            await page.close()
+                seen = set()
+                result = []
+                for c in cats:
+                    href = c.get("href", "")
+                    name = c.get("name", "")
+                    m = re.search(r"/c/([^/#]+)", href)
+                    if not m:
+                        continue
+                    slug = m.group(1)
+                    if slug in seen or len(name) < 3:
+                        continue
+                    seen.add(slug)
+                    result.append({"id": slug, "name": name})
+                print(f"[scraper] Scraped {len(result)} categories", flush=True)
+                return result
+            except Exception as e:
+                print(f"[scraper] Failed to scrape categories: {e}", flush=True)
+                return []
+            finally:
+                await page.close()
+        except Exception as e:
+            print(f"[scraper] Browser error in get_categories: {e}", flush=True)
+            return FALLBACK_CATEGORIES
 
     async def search_cheapest(
         self, category_id: str, category_name: str, limit: int = 50, offset: int = 0
@@ -98,7 +142,12 @@ class MLApiClient:
         slug = category_id
         url = f"https://www.mercadolibre.com.ar/c/{slug}"
 
-        page = await _new_page()
+        try:
+            page = await _new_page()
+        except Exception as e:
+            print(f"[scraper] Failed to create page for {category_id}: {e}", flush=True)
+            return [], None
+
         try:
             await page.goto(
                 "https://www.mercadolibre.com.ar/",
@@ -114,8 +163,10 @@ class MLApiClient:
 
             resp = await page.goto(url, wait_until="load", timeout=20000)
             if resp and resp.status == 404:
+                print(f"[scraper] {category_id}: 404", flush=True)
                 return [], 0
             if "blocked" in page.url.lower() or "account-verification" in page.url.lower():
+                print(f"[scraper] {category_id}: blocked ({page.url})", flush=True)
                 return [], 0
 
             await page.wait_for_timeout(2000)
@@ -224,6 +275,9 @@ class MLApiClient:
                     total = int(nums[0])
 
             return results, total or len(results)
+        except Exception as e:
+            print(f"[scraper] Error in search_cheapest({category_id}): {e}", flush=True)
+            return [], None
         finally:
             await page.close()
 

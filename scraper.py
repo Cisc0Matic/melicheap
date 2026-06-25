@@ -19,6 +19,7 @@ async def refresh_all_categories() -> list[Category]:
     client = MLApiClient()
     try:
         api_categories = await client.get_categories()
+        print(f"[scraper] Got {len(api_categories)} categories from API", flush=True)
         session = get_session()
         try:
             categories = []
@@ -32,9 +33,13 @@ async def refresh_all_categories() -> list[Category]:
                 cat.updated_at = datetime.now()
                 categories.append(cat)
             session.commit()
+            print(f"[scraper] Saved {len(categories)} categories to DB", flush=True)
             return categories
         finally:
             session.close()
+    except Exception as e:
+        print(f"[scraper] refresh_all_categories error: {e}", flush=True)
+        return []
     finally:
         await client.close()
 
@@ -46,6 +51,7 @@ async def refresh_cheapest_for_category(category_id: str, category_name: str):
             category_id, category_name, limit=50, offset=0
         )
         all_results = list(results)
+        print(f"[scraper] {category_name}: {len(all_results)} products (total={total})", flush=True)
 
         session = get_session()
         try:
@@ -119,9 +125,14 @@ def get_refresh_progress() -> dict:
 
 
 async def refresh_all():
+    print("[scraper] refresh_all started", flush=True)
     client = MLApiClient()
     try:
         api_categories = await client.get_categories()
+        print(f"[scraper] Got {len(api_categories)} categories", flush=True)
+    except Exception as e:
+        print(f"[scraper] Error fetching categories: {e}", flush=True)
+        api_categories = []
     finally:
         await client.close()
 
@@ -146,9 +157,13 @@ async def refresh_all():
     async def scrape_one(cat_data):
         async with sem:
             _refresh_progress["current"] = cat_data["name"]
-            await refresh_cheapest_for_category(cat_data["id"], cat_data["name"])
+            try:
+                await refresh_cheapest_for_category(cat_data["id"], cat_data["name"])
+            except Exception as e:
+                print(f"[scraper] Error refreshing {cat_data['name']}: {e}", flush=True)
             _refresh_progress["done"] += 1
 
     tasks = [scrape_one(c) for c in api_categories]
     await asyncio.gather(*tasks)
     _refresh_progress["current"] = ""
+    print("[scraper] refresh_all complete", flush=True)
