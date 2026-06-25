@@ -12,14 +12,13 @@ from starlette.requests import Request
 
 from database import init_db, get_session, Category, Product, PriceHistory, product_categories
 from scraper import refresh_all, refresh_all_categories, refresh_cheapest_for_category, get_refresh_progress
-from ml_api import close_browser
+
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
     yield
-    await close_browser()
 
 
 app = FastAPI(title="Meli Cheap", lifespan=lifespan)

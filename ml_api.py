@@ -1,48 +1,20 @@
+import asyncio
 import re
 from typing import Optional
-from playwright.async_api import async_playwright, Page, Browser
+
+import httpx
+from bs4 import BeautifulSoup
 
 MAX_PRODUCTS = 200
 
-_BROWSER: Optional[Browser] = None
-_PLAY_CM = None
-
-
-async def _get_browser() -> Browser:
-    global _BROWSER, _PLAY_CM
-    if _BROWSER is None:
-        _PLAY_CM = async_playwright()
-        playwright = await _PLAY_CM.__aenter__()
-        _BROWSER = await playwright.chromium.launch(
-            headless=True,
-            args=["--disable-blink-features=AutomationControlled", "--no-sandbox"],
-        )
-    return _BROWSER
-
-
-async def close_browser():
-    global _BROWSER, _PLAY_CM
-    if _BROWSER:
-        await _BROWSER.close()
-        _BROWSER = None
-    if _PLAY_CM:
-        await _PLAY_CM.__aexit__(None, None, None)
-        _PLAY_CM = None
-
-
-async def _new_page() -> Page:
-    browser = await _get_browser()
-    context = await browser.new_context(
-        viewport={"width": 1280, "height": 800},
-        locale="es-AR",
-        timezone_id="America/Argentina/Buenos_Aires",
-        user_agent=(
-            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-            "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        ),
-    )
-    return await context.new_page()
-
+HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "es-AR,es;q=0.9,en;q=0.8",
+}
 
 FALLBACK_CATEGORIES = [
     {"id": "celulares", "name": "Celulares y Teléfonos"},
@@ -80,60 +52,48 @@ FALLBACK_CATEGORIES = [
 ]
 
 
+def _parse_price(el) -> Optional[int]:
+    if el is None:
+        return None
+    text = el.get_text(strip=True)
+    num = int(text.replace(".", ""))
+    return num
+
+
 class MLApiClient:
     async def close(self):
         pass
 
     async def get_categories(self) -> list[dict]:
         try:
-            page = await _new_page()
-            try:
-                await page.goto(
+            async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+                resp = await client.get(
                     "https://www.mercadolibre.com.ar/categorias",
-                    wait_until="load",
-                    timeout=30000,
+                    headers=HEADERS,
                 )
-                await page.wait_for_timeout(2000)
-
-                cats = await page.evaluate("""
-                    () => {
-                        const links = document.querySelectorAll('a[href*="/c/"]');
-                        const seen = new Set();
-                        const result = [];
-                        links.forEach(a => {
-                            const href = a.getAttribute('href') || '';
-                            const text = a.textContent?.trim();
-                            if (text && text.length >= 3 && !seen.has(href)) {
-                                seen.add(href);
-                                result.push({ name: text, href });
-                            }
-                        });
-                        return result;
-                    }
-                """)
-
+                resp.raise_for_status()
+                soup = BeautifulSoup(resp.text, "lxml")
                 seen = set()
                 result = []
-                for c in cats:
-                    href = c.get("href", "")
-                    name = c.get("name", "")
+                for a in soup.select('a[href*="/c/"]'):
+                    href = a.get("href", "")
+                    text = a.get_text(strip=True)
+                    if not text or len(text) < 3:
+                        continue
                     m = re.search(r"/c/([^/#]+)", href)
                     if not m:
                         continue
                     slug = m.group(1)
-                    if slug in seen or len(name) < 3:
+                    if slug in seen:
                         continue
                     seen.add(slug)
-                    result.append({"id": slug, "name": name})
-                print(f"[scraper] Scraped {len(result)} categories", flush=True)
-                return result
-            except Exception as e:
-                print(f"[scraper] Failed to scrape categories: {e}", flush=True)
+                    result.append({"id": slug, "name": text})
+                if result:
+                    print(f"[scraper] Scraped {len(result)} categories", flush=True)
+                    return result
                 return []
-            finally:
-                await page.close()
         except Exception as e:
-            print(f"[scraper] Browser error in get_categories: {e}", flush=True)
+            print(f"[scraper] Failed to scrape categories: {e}", flush=True)
             return FALLBACK_CATEGORIES
 
     async def search_cheapest(
@@ -143,146 +103,174 @@ class MLApiClient:
         url = f"https://www.mercadolibre.com.ar/c/{slug}"
 
         try:
-            page = await _new_page()
-        except Exception as e:
-            print(f"[scraper] Failed to create page for {category_id}: {e}", flush=True)
-            return [], None
+            async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+                client.cookies.set("_bm_skipml", "true", domain=".mercadolibre.com.ar")
 
-        try:
-            await page.goto(
-                "https://www.mercadolibre.com.ar/",
-                wait_until="load",
-                timeout=20000,
-            )
-            await page.wait_for_timeout(1000)
+                await client.get("https://www.mercadolibre.com.ar/", headers=HEADERS)
 
-            await page.evaluate("""
-                const d = new Date(Date.now() + 3600000);
-                document.cookie = '_bm_skipml=true; Path=/; domain=.mercadolibre.com.ar; expires=' + d.toUTCString();
-            """)
+                resp = await client.get(url, headers=HEADERS)
+                if resp.status_code == 404:
+                    print(f"[scraper] {category_id}: 404", flush=True)
+                    return [], 0
 
-            resp = await page.goto(url, wait_until="load", timeout=20000)
-            if resp and resp.status == 404:
-                print(f"[scraper] {category_id}: 404", flush=True)
-                return [], 0
-            if "blocked" in page.url.lower() or "account-verification" in page.url.lower():
-                print(f"[scraper] {category_id}: blocked ({page.url})", flush=True)
-                return [], 0
+                url_lower = str(resp.url).lower()
+                if "blocked" in url_lower or "account-verification" in url_lower:
+                    print(f"[scraper] {category_id}: blocked ({resp.url})", flush=True)
+                    return [], 0
 
-            await page.wait_for_timeout(2000)
+                soup = BeautifulSoup(resp.text, "lxml")
+                cards = soup.select(".poly-card")
 
-            js_code = """
-            () => {
-                function parsePrice(fracEl) {
-                    if (!fracEl) return null;
-                    const text = fracEl.textContent.trim();
-                    const num = parseInt(text.replace(/[.]/g, ''));
-                    return isNaN(num) ? null : num;
-                }
+                results = []
+                for card in cards:
+                    links = card.select("a")
+                    is_ad = any(
+                        "is_advertising=true" in (l.get("href", "") or "")
+                        for l in links
+                    )
+                    if is_ad:
+                        continue
 
-                const cards = document.querySelectorAll('.poly-card');
-                const results = [];
-                for (const card of cards) {
-                    const links = Array.from(card.querySelectorAll('a'));
-                    const isAd = links.some(l => (l.href || '').includes('is_advertising=true'));
-                    if (isAd) continue;
+                    title_el = card.select_one(
+                        ".poly-component__title, .poly-box__title, "
+                        '[class*="title"] a, h2, h3'
+                    )
+                    title = title_el.get_text(strip=True) if title_el else ""
 
-                    const titleEl = card.querySelector('.poly-component__title, .poly-box__title, [class*="title"] a, h2, h3');
-                    const title = titleEl ? (titleEl.textContent || titleEl.innerText || '').trim() : '';
+                    current_price_el = card.select_one(
+                        ".andes-money-amount--cents-superscript "
+                        ".andes-money-amount__fraction"
+                    )
+                    generic_price_el = card.select_one(
+                        ".andes-money-amount__fraction"
+                    )
 
-                    const currentPriceEl = card.querySelector('.andes-money-amount--cents-superscript .andes-money-amount__fraction');
-                    const prevPriceEl = card.querySelector('s.andes-money-amount--previous .andes-money-amount__fraction');
-                    const discountEl = card.querySelector('.poly-price__disc_label--pill');
-                    const genericPriceEl = card.querySelector('.andes-money-amount__fraction');
+                    if current_price_el:
+                        price = _parse_price(current_price_el)
+                    elif generic_price_el:
+                        price = _parse_price(generic_price_el)
+                    else:
+                        price = None
 
-                    let price = null;
-                    if (currentPriceEl) {
-                        price = parsePrice(currentPriceEl);
-                    } else if (genericPriceEl) {
-                        price = parsePrice(genericPriceEl);
-                    }
+                    prev_price_el = card.select_one(
+                        "s.andes-money-amount--previous "
+                        ".andes-money-amount__fraction"
+                    )
+                    original_price = _parse_price(prev_price_el)
 
-                    let original_price = null;
-                    if (prevPriceEl) {
-                        original_price = parsePrice(prevPriceEl);
-                    }
+                    discount_el = card.select_one(
+                        ".poly-price__disc_label--pill"
+                    )
+                    discount_percentage = None
+                    if discount_el:
+                        match = re.search(
+                            r"(\d+)%\s*OFF",
+                            discount_el.get_text(strip=True),
+                        )
+                        if match:
+                            discount_percentage = int(match[1])
 
-                    let discount_percentage = null;
-                    if (discountEl) {
-                        const match = discountEl.textContent.trim().match(/(\\d+)%\\s*OFF/);
-                        if (match) discount_percentage = parseInt(match[1]);
-                    }
+                    shipping_el = card.select_one(
+                        '.poly-component__shipping, [class*="shipping"]'
+                    )
+                    free_shipping = 0
+                    if shipping_el:
+                        txt = shipping_el.get_text(strip=True).lower()
+                        if "envío gratis" in txt:
+                            free_shipping = 1
 
-                    const shippingEl = card.querySelector('.poly-component__shipping, [class*="shipping"]');
-                    const free_shipping = shippingEl && shippingEl.textContent.trim().toLowerCase().includes('env\\u00edo gratis') ? 1 : 0;
+                    condition_el = card.select_one(
+                        '.poly-component__condition, [class*="condition"]'
+                    )
+                    condition = None
+                    if condition_el:
+                        t = condition_el.get_text(strip=True).lower()
+                        if "nuevo" in t:
+                            condition = "new"
+                        elif "usado" in t:
+                            condition = "used"
 
-                    const conditionEl = card.querySelector('.poly-component__condition, [class*="condition"]');
-                    let condition = null;
-                    if (conditionEl) {
-                        const t = conditionEl.textContent.trim().toLowerCase();
-                        if (t.includes('nuevo')) condition = 'new';
-                        else if (t.includes('usado')) condition = 'used';
-                    }
+                    installments_el = card.select_one(
+                        '.poly-price__installments, [class*="installments"]'
+                    )
+                    installments = (
+                        installments_el.get_text(strip=True)
+                        if installments_el
+                        else None
+                    )
 
-                    const installmentsEl = card.querySelector('.poly-price__installments, [class*="installments"]');
-                    const installments = installmentsEl ? installmentsEl.textContent.trim() : null;
+                    permalink = ""
+                    for l in links:
+                        href = l.get("href", "") or ""
+                        if (
+                            "mercadolibre" in href
+                            and "is_advertising" not in href
+                            and "mclics" not in href
+                        ):
+                            permalink = href
+                            break
 
-                    const linkEl = links.find(l => (l.href || '').includes('mercadolibre') && !(l.href || '').includes('is_advertising') && !(l.href || '').includes('mclics'));
-                    const permalink = linkEl ? linkEl.href : '';
+                    img_el = card.select_one("img")
+                    thumbnail = ""
+                    if img_el:
+                        thumbnail = (
+                            img_el.get("src")
+                            or img_el.get("data-src")
+                            or ""
+                        )
+                        if thumbnail.startswith("//"):
+                            thumbnail = "https:" + thumbnail
 
-                    const imgEl = card.querySelector('img');
-                    let thumbnail = imgEl ? (imgEl.src || imgEl.getAttribute('data-src') || '') : '';
-                    if (thumbnail && thumbnail.startsWith('//')) {
-                        thumbnail = 'https:' + thumbnail;
-                    }
+                    currency_el = card.select_one(
+                        ".andes-money-amount__currency-symbol"
+                    )
+                    currency_id = (
+                        currency_el.get_text(strip=True)
+                        if currency_el
+                        else "ARS"
+                    )
 
-                    const currencyEl = card.querySelector('.andes-money-amount__currency-symbol');
-                    const currency_id = currencyEl ? currencyEl.textContent.trim() : 'ARS';
+                    if title and price:
+                        results.append({
+                            "title": title,
+                            "price": price,
+                            "original_price": original_price,
+                            "discount_percentage": discount_percentage,
+                            "free_shipping": free_shipping,
+                            "condition": condition,
+                            "installments": installments,
+                            "currency_id": currency_id,
+                            "permalink": permalink,
+                            "thumbnail": thumbnail,
+                        })
 
-                    if (title && price) {
-                        results.push({
-                            title,
-                            price,
-                            original_price,
-                            discount_percentage,
-                            free_shipping,
-                            condition,
-                            installments,
-                            currency_id,
-                            permalink,
-                            thumbnail,
-                        });
-                    }
-                }
-                return results;
-            }
-            """
-            results = await page.evaluate(js_code)
-            results.sort(key=lambda r: r.get("price", 0))
+                results.sort(key=lambda r: r.get("price", 0))
 
-            total_text = ""
-            try:
-                total_text = await page.evaluate(
-                    "document.querySelector('.ui-search-search-result__quantity-results')?.textContent || ''"
+                total_el = soup.select_one(
+                    ".ui-search-search-result__quantity-results"
                 )
-            except Exception:
-                pass
+                total = None
+                if total_el:
+                    nums = re.findall(
+                        r"[\d.]+",
+                        total_el.get_text(strip=True).replace(".", ""),
+                    )
+                    if nums:
+                        total = int(nums[0])
 
-            total = None
-            if total_text:
-                nums = re.findall(r"[\d.]+", total_text.replace(".", ""))
-                if nums:
-                    total = int(nums[0])
-
-            return results, total or len(results)
+                return results, total or len(results)
         except Exception as e:
-            print(f"[scraper] Error in search_cheapest({category_id}): {e}", flush=True)
+            print(
+                f"[scraper] Error in search_cheapest({category_id}): {e}",
+                flush=True,
+            )
             return [], None
-        finally:
-            await page.close()
 
     async def fetch_all_cheapest(
-        self, category_id: str, category_name: str, max_products: int = MAX_PRODUCTS
+        self,
+        category_id: str,
+        category_name: str,
+        max_products: int = MAX_PRODUCTS,
     ) -> list[dict]:
         all_results = []
         offset = 0
